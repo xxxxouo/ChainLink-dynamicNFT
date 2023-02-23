@@ -12,22 +12,36 @@ import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
 // ./interfaces/KeeperCompatibleInterface.sol
 import "@chainlink/contracts/src/v0.8/KeeperCompatible.sol";
 
-import "@chainlink/contracts/src/v0.8/ConfirmedOwner.sol";
 import "@chainlink/contracts/src/v0.8/interfaces/VRFCoordinatorV2Interface.sol";
-import "@chainlink/contracts/src/v0.8/dev/VRFConsumerBaseV2Upgradeable.sol";
+import "@chainlink/contracts/src/v0.8/VRFConsumerBaseV2.sol";
 
 
-// 0x8D7a5d8C09B6278917F9df97013370327e7e1961
-contract BullBear is ERC721, ERC721Enumerable, ERC721URIStorage, Ownable, KeeperCompatibleInterface {
+//  deploy: goerli 0x4b5Dac5Ee4611BfB2915E5e04286f422DfE6458e
+contract BullBear is ERC721, ERC721Enumerable, ERC721URIStorage, Ownable, KeeperCompatibleInterface,VRFConsumerBaseV2 {
     using Counters for Counters.Counter;
 
     Counters.Counter private _tokenIdCounter;
     // address public owner;
+
+    AggregatorV3Interface public priceFeed;
+    //VRF
+    VRFCoordinatorV2Interface public COORDINATOR;
+    uint256[] public s_randomWords;
+    uint256 public s_requestId;
+    uint32 public callbackGasLimit = 500000; // set higher as fulfillRandomWords is doing a LOT of heavy lifting.
+    uint64 public s_subscriptionId;
+    bytes32 keyhash =  0x79d3d8832d904592c0bf9818b621522c988bb8b0c05cdc3b15aea1b6e8db0c15; 
+
+    enum MarketTrend{
+      BULL,
+      BEAR
+    }
+    MarketTrend public currentMarketTrend = MarketTrend.BULL;
+
+
     uint256 public /*immutable*/ interval;
     uint256 public lastTimeStamp;
-    AggregatorV3Interface public priceFeed;
-
-    int256 public currentPrice = 0;
+    int256 public currentPrice;
 
     string[] bullUrisIpfs = [
         "https://ipfs.io/ipfs/QmRXyfi3oNZCubDxiVFre3kLZ8XeGt6pQsnAQRZ7akhSNs?filename=gamer_bull.json",
@@ -42,7 +56,7 @@ contract BullBear is ERC721, ERC721Enumerable, ERC721URIStorage, Ownable, Keeper
 
     event TokensUpdated(string marketTrend);
 
-    constructor(uint256 updateInterval, address _priceFeed) ERC721("Bull&Bear", "BBTK") {
+    constructor(uint256 updateInterval, address _priceFeed, address _vrfCoordinator) ERC721("Bull&Bear", "BBTK")VRFConsumerBaseV2(_vrfCoordinator) {
         // owner = msg.sender;
         // 设置了keeper 更新间隔数据 
         interval = updateInterval;
@@ -54,6 +68,7 @@ contract BullBear is ERC721, ERC721Enumerable, ERC721URIStorage, Ownable, Keeper
         priceFeed = AggregatorV3Interface(_priceFeed);
 
         currentPrice = getLatestPrice();
+        COORDINATOR = VRFCoordinatorV2Interface(_vrfCoordinator);
     }
 
     function safeMint(address to) public onlyOwner {
@@ -83,15 +98,16 @@ contract BullBear is ERC721, ERC721Enumerable, ERC721URIStorage, Ownable, Keeper
             int256 latestPrice = getLatestPrice();
 
             if( latestPrice == currentPrice ){
-                return;
+              return;
             }
 
             if(latestPrice < currentPrice){
-                updateAllTokenUris("bear");
+                currentMarketTrend = MarketTrend.BEAR;
             } else {
-                updateAllTokenUris("bull");
+                currentMarketTrend = MarketTrend.BULL;
             }
-
+            // 启动VRF获取随机数字
+            requestRandomnessForNFTUris();
             currentPrice = latestPrice;
         }
     }
@@ -108,18 +124,28 @@ contract BullBear is ERC721, ERC721Enumerable, ERC721URIStorage, Ownable, Keeper
         return answer;
     }
 
-    function updateAllTokenUris(string memory trend) internal  {
-        if(compareStrings(trend, "bear")){
-            for(uint256 i; i < _tokenIdCounter.current() ; i++){
-                _setTokenURI(i, bearUrisIpfs[0]);
-            }
-        } else {
-            for(uint256 i; i < _tokenIdCounter.current(); i++){
-                _setTokenURI(i, bullUrisIpfs[0]);
-            }
-        }
-        emit TokensUpdated(trend);
+    function requestRandomnessForNFTUris() internal {
+      require(s_subscriptionId != 0 ,"Subscription ID not set");
+      s_requestId = COORDINATOR.requestRandomWords(
+        keyhash,
+        s_subscriptionId,
+        3,
+        callbackGasLimit,
+        1
+      );
     }
+
+    function fulfillRandomWords(uint256 _requestId, uint256[] memory randomWords) internal override {
+      s_randomWords = randomWords;
+      string[] memory urisForTrend = currentMarketTrend == MarketTrend.BULL? bullUrisIpfs: bearUrisIpfs;
+      uint idx = s_randomWords[0] % urisForTrend.length;
+      for (uint256 i = 0; i < _tokenIdCounter.current(); i++) {
+        _setTokenURI(i, urisForTrend[idx]);
+      }
+      string memory trend = currentMarketTrend == MarketTrend.BULL ? "bullish" : "bearish";
+      emit TokensUpdated(trend);
+    }
+
 
     //Helps
     function compareStrings(string memory a, string memory b) private pure returns(bool) {
@@ -137,6 +163,16 @@ contract BullBear is ERC721, ERC721Enumerable, ERC721URIStorage, Ownable, Keeper
     function setPriceFeed(address newPriceFeed) public onlyOwner {
         priceFeed = AggregatorV3Interface(newPriceFeed);
     }
+    // For VRF Subscription Manager
+    function setSubscriptionId(uint64 _id) public onlyOwner {
+        s_subscriptionId = _id;
+    }
+    function setCallbackGasLimit(uint32 maxGas) public onlyOwner {
+      callbackGasLimit = maxGas;
+    }
+    function setVrfCoodinator(address _address) public onlyOwner {
+      COORDINATOR = VRFCoordinatorV2Interface(_address);
+  } 
 
     // The following functions are overrides required by Solidity.
 
